@@ -14,8 +14,13 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.5'
-      - run: gradle assembleRelease
+      - name: Build
+        run: |
+          S=$(find . -name settings.gradle -not -path './.git/*' | head -n1)
+          if [ -z "$S" ]; then echo "settings.gradle not found in repo"; find . -not -path './.git/*' | head -50; exit 1; fi
+          cd "$(dirname "$S")"
+          gradle assembleRelease
       - uses: actions/upload-artifact@v4
         with:
           name: CleanLauncher-apk
-          path: app/build/outputs/apk/release/*.apk
+          path: '**/build/outputs/apk/release/*.apk'
