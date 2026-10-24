@@ -8,13 +8,14 @@ import android.graphics.drawable.*;
 import android.os.*;
 import android.text.TextUtils;
 import android.util.LruCache;
+import android.util.TypedValue;
 import android.view.*;
 import android.widget.*;
 import java.io.File;
 import java.util.*;
 import java.util.concurrent.*;
 
-/** Quiet home screen: photo/dark/light background, clock, glass tiles. Dock or List layout. */
+/** Quiet home screen: full-screen photo, small clock, glass dock. Dock or List layout. */
 public class MainActivity extends Activity {
     static class App { String label, pkg; ComponentName cn; }
     static final int[][] WALL = {{0xFF1F1C2C, 0xFF928DAB}, {0xFF0F2027, 0xFF2C5364},
@@ -29,10 +30,9 @@ public class MainActivity extends Activity {
     LruCache<String, Bitmap> cache;
     SharedPreferences sp;
     PackageManager pm;
-    Typeface light;
-    float d;
+    Typeface light, reg;
     int sw, sh, layout, show, bg, lastBg = -1, mode, focusIdx, fg;
-    boolean c24, overlayOpen, swallowUp, receiverOn;
+    boolean c24, overlayOpen, swallowUp, receiverOn, direct;
     Bitmap photoBmp;
     FrameLayout root, home;
     LinearLayout panel;
@@ -45,18 +45,19 @@ public class MainActivity extends Activity {
         @Override public void onReceive(Context c, Intent i) { reload(); }
     };
 
-    int dp(int v) { return (int) (v * d + 0.5f); }
+    /** Units are 1/540 of screen height, so the layout scales to any TV resolution. */
+    int dp(int v) { return Math.round(v * sh / 540f); }
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
         pm = getPackageManager();
         sp = getSharedPreferences("p", MODE_PRIVATE);
-        d = getResources().getDisplayMetrics().density;
         int w = getResources().getDisplayMetrics().widthPixels, h = getResources().getDisplayMetrics().heightPixels;
         sw = Math.max(w, h); sh = Math.min(w, h);
         light = Typeface.create("sans-serif-light", Typeface.NORMAL);
+        reg = Typeface.create("sans-serif", Typeface.NORMAL);
         layout = sp.getInt("layout", 0); show = sp.getInt("show", 0);
-        bg = sp.getInt("bg", 0); c24 = sp.getBoolean("c24", false);
+        bg = sp.getInt("bg", photoExists() ? 4 : 1); c24 = sp.getBoolean("c24", false);
         cache = new LruCache<String, Bitmap>(6 * 1024 * 1024) {
             @Override protected int sizeOf(String k, Bitmap v) { return v.getByteCount(); }
         };
@@ -123,7 +124,7 @@ public class MainActivity extends Activity {
         int k = e.getKeyCode();
         boolean down = e.getAction() == KeyEvent.ACTION_DOWN;
         if (k == KeyEvent.KEYCODE_MENU) {
-            if (!down) { if (overlayOpen) onBackPressed(); else openOverlay(); }
+            if (!down) { if (overlayOpen) onBackPressed(); else openOverlay(false); }
             return true;
         }
         if (overlayOpen) {
@@ -139,7 +140,7 @@ public class MainActivity extends Activity {
             return super.dispatchKeyEvent(e);
         }
         if (k == KeyEvent.KEYCODE_DPAD_CENTER || k == KeyEvent.KEYCODE_ENTER) {
-            if (down && e.getRepeatCount() == 1) { openOverlay(); swallowUp = true; return true; }
+            if (down && e.getRepeatCount() == 1) { openOverlay(false); swallowUp = true; return true; }
             if (!down && swallowUp) { swallowUp = false; return true; }
         }
         return super.dispatchKeyEvent(e);
@@ -148,17 +149,20 @@ public class MainActivity extends Activity {
     // ---------- data ----------
     void reload() {
         io.execute(new Runnable() { public void run() {
-            Intent q = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
             final ArrayList<App> out = new ArrayList<App>();
             HashSet<String> seen = new HashSet<String>();
-            for (ResolveInfo ri : pm.queryIntentActivities(q, 0)) {
-                String pkg = ri.activityInfo.packageName;
-                if (pkg.equals(getPackageName()) || !seen.add(pkg)) continue;
-                App a = new App();
-                a.pkg = pkg;
-                a.cn = new ComponentName(pkg, ri.activityInfo.name);
-                a.label = String.valueOf(ri.loadLabel(pm));
-                out.add(a);
+            String[] cats = {Intent.CATEGORY_LAUNCHER, "android.intent.category.LEANBACK_LAUNCHER"};
+            for (String cat : cats) {
+                Intent q = new Intent(Intent.ACTION_MAIN).addCategory(cat);
+                for (ResolveInfo ri : pm.queryIntentActivities(q, 0)) {
+                    String pkg = ri.activityInfo.packageName;
+                    if (pkg.equals(getPackageName()) || !seen.add(pkg)) continue;
+                    App a = new App();
+                    a.pkg = pkg;
+                    a.cn = new ComponentName(pkg, ri.activityInfo.name);
+                    a.label = String.valueOf(ri.loadLabel(pm));
+                    out.add(a);
+                }
             }
             Collections.sort(out, new Comparator<App>() {
                 public int compare(App x, App y) { return x.label.compareToIgnoreCase(y.label); }
@@ -186,22 +190,22 @@ public class MainActivity extends Activity {
     // ---------- rendering ----------
     TextView text(String s, int size, int color) {
         TextView t = new TextView(this);
-        t.setText(s); t.setTextSize(size); t.setTextColor(color); t.setTypeface(light);
+        t.setText(s); t.setTextSize(TypedValue.COMPLEX_UNIT_PX, dp(size)); t.setTextColor(color); t.setTypeface(reg);
         t.setSingleLine(true); t.setEllipsize(TextUtils.TruncateAt.END);
         return t;
     }
 
-    GradientDrawable rr(int fill, int stroke) {
+    GradientDrawable rr(int fill, int radius) {
         GradientDrawable g = new GradientDrawable();
-        g.setColor(fill); g.setCornerRadius(dp(18)); g.setStroke(dp(1), stroke);
+        g.setColor(fill); g.setCornerRadius(dp(radius));
         return g;
     }
 
-    Drawable glass() {
-        int base = bg == 6 ? 0x000000 : 0xFFFFFF;
+    /** Transparent until focused, then a soft light rounded rectangle. */
+    Drawable glass(int radius) {
         StateListDrawable s = new StateListDrawable();
-        s.addState(new int[]{android.R.attr.state_focused}, rr(0x5A000000 | base, 0xAA000000 | base));
-        s.addState(new int[]{}, rr(0x1F000000 | base, 0x2E000000 | base));
+        s.addState(new int[]{android.R.attr.state_focused}, rr(bg == 6 ? 0x33000000 : 0x40FFFFFF, radius));
+        s.addState(new int[]{}, new ColorDrawable(0));
         return s;
     }
 
@@ -235,8 +239,11 @@ public class MainActivity extends Activity {
         if (bg < 4) return new GradientDrawable(GradientDrawable.Orientation.TL_BR, WALL[bg]);
         if (bg == 4) {
             if (photoBmp == null) photoBmp = loadPhoto();
-            if (photoBmp != null)
-                return new LayerDrawable(new Drawable[]{new BitmapDrawable(getResources(), photoBmp), new ColorDrawable(0x66000000)});
+            if (photoBmp != null) {
+                GradientDrawable shade = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                        new int[]{0x66000000, 0x1A000000, 0x40000000});
+                return new LayerDrawable(new Drawable[]{new BitmapDrawable(getResources(), photoBmp), shade});
+            }
             return new ColorDrawable(0xFF0B0B0D);
         }
         return new ColorDrawable(bg == 5 ? 0xFF0B0B0D : 0xFFEDEDEF);
@@ -248,95 +255,113 @@ public class MainActivity extends Activity {
         home.removeAllViews();
         final boolean lst = layout == 1;
 
-        LinearLayout clk = new LinearLayout(this);
-        clk.setOrientation(LinearLayout.VERTICAL);
+        TextClock clock = new TextClock(this);
         String f = c24 ? "HH:mm" : "h:mm";
-        TextClock t = new TextClock(this);
-        t.setFormat12Hour(f); t.setFormat24Hour(f);
-        t.setTextColor(fg); t.setTextSize(lst ? 96 : 72); t.setTypeface(light); t.setIncludeFontPadding(false);
-        TextClock dt = new TextClock(this);
-        dt.setFormat12Hour("EEEE, d MMMM"); dt.setFormat24Hour("EEEE, d MMMM");
-        dt.setTextColor(fg); dt.setTextSize(20); dt.setTypeface(light); dt.setAlpha(0.7f);
-        clk.addView(t); clk.addView(dt);
+        clock.setFormat12Hour(f); clock.setFormat24Hour(f);
+        clock.setTextColor(fg); clock.setTypeface(light); clock.setIncludeFontPadding(false);
+        clock.setTextSize(TypedValue.COMPLEX_UNIT_PX, dp(lst ? 64 : 27));
 
         ArrayList<App> items = homeApps();
-        App s = new App(); s.label = "Settings"; items.add(s);
-
         if (!lst) {
+            FrameLayout dock = new FrameLayout(this);
+            dock.setBackgroundDrawable(rr(bg == 6 ? 0x99FFFFFF : 0x8C1B2327, 26));
             HorizontalScrollView hs = new HorizontalScrollView(this);
             hs.setHorizontalScrollBarEnabled(false);
-            hs.setClipChildren(false); hs.setClipToPadding(false);
-            hs.setPadding(dp(48), dp(24), dp(48), dp(24));
+            hs.setClipToPadding(false);
+            hs.setPadding(dp(6), dp(7), dp(6), dp(7));
             LinearLayout row = new LinearLayout(this);
-            row.setClipChildren(false);
             for (App a : items) {
-                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
-                lp.setMargins(dp(8), 0, dp(8), 0);
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(144), dp(100));
+                lp.rightMargin = dp(4);
                 row.addView(tile(a, false), lp);
             }
             hs.addView(row);
-            FrameLayout.LayoutParams hp = new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM);
-            hp.bottomMargin = dp(24);
-            home.addView(hs, hp);
+            dock.addView(hs, new FrameLayout.LayoutParams(-1, -1));
+            FrameLayout.LayoutParams dl = new FrameLayout.LayoutParams(-1, dp(115), Gravity.BOTTOM);
+            dl.leftMargin = dp(50); dl.rightMargin = dp(50); dl.bottomMargin = dp(86);
+            home.addView(dock, dl);
             FrameLayout.LayoutParams cp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.LEFT);
-            cp.leftMargin = dp(64); cp.topMargin = dp(48);
-            home.addView(clk, cp);
+            cp.leftMargin = dp(70); cp.topMargin = dp(36);
+            home.addView(clock, cp);
             tiles = row;
         } else {
             ScrollView sv = new ScrollView(this);
             sv.setVerticalScrollBarEnabled(false);
-            sv.setClipChildren(false); sv.setClipToPadding(false);
-            sv.setPadding(dp(48), dp(40), dp(48), dp(40));
+            sv.setClipToPadding(false);
+            sv.setPadding(dp(50), dp(70), dp(30), dp(40));
             LinearLayout col = new LinearLayout(this);
             col.setOrientation(LinearLayout.VERTICAL);
-            col.setClipChildren(false);
             for (App a : items) {
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-                lp.bottomMargin = dp(8);
+                lp.bottomMargin = dp(4);
                 col.addView(tile(a, true), lp);
             }
             sv.addView(col);
-            home.addView(sv, new FrameLayout.LayoutParams(dp(520), -1, Gravity.LEFT));
-            clk.setGravity(Gravity.RIGHT);
+            home.addView(sv, new FrameLayout.LayoutParams(dp(300), -1, Gravity.LEFT));
             FrameLayout.LayoutParams cp = new FrameLayout.LayoutParams(-2, -2, Gravity.RIGHT | Gravity.CENTER_VERTICAL);
-            cp.rightMargin = dp(80);
-            home.addView(clk, cp);
+            cp.rightMargin = dp(90);
+            home.addView(clock, cp);
             tiles = col;
         }
+
+        LinearLayout top = new LinearLayout(this);
+        for (int i = 0; i < 3; i++) {
+            final int type = i;
+            IconView iv = new IconView(this, i);
+            iv.setFocusable(true);
+            iv.setBackgroundDrawable(glass(10));
+            iv.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    if (type == 0) { cycleBg(); }
+                    else openOverlay(type == 1);
+                }
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(36), dp(36));
+            lp.leftMargin = dp(4);
+            top.addView(iv, lp);
+        }
+        FrameLayout.LayoutParams tp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.RIGHT);
+        tp.rightMargin = dp(60); tp.topMargin = dp(34);
+        home.addView(top, tp);
+
         if (!overlayOpen && tiles.getChildCount() > 0)
             tiles.getChildAt(Math.min(focusIdx, tiles.getChildCount() - 1)).requestFocus();
+    }
+
+    void cycleBg() {
+        bg = (bg + 1) % 7;
+        if (bg == 4 && !photoExists()) bg = 5;
+        savePrefs();
+        render();
     }
 
     View tile(final App a, final boolean lst) {
         LinearLayout t = new LinearLayout(this);
         t.setOrientation(lst ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
         t.setGravity(lst ? Gravity.CENTER_VERTICAL : Gravity.CENTER);
-        t.setPadding(dp(14), dp(12), dp(14), dp(12));
-        t.setBackgroundDrawable(glass());
+        t.setPadding(dp(10), dp(8), dp(10), dp(8));
+        t.setBackgroundDrawable(glass(lst ? 12 : 15));
         t.setFocusable(true);
         ImageView iv = null;
         if (show != 2) {
             iv = new ImageView(this);
-            int sz = dp(lst ? 40 : 64);
+            int sz = dp(lst ? 28 : 36);
             t.addView(iv, new LinearLayout.LayoutParams(sz, sz));
             icon(a, iv);
         }
         if (show != 1) {
-            TextView tv = text(a.label, lst ? 20 : 14, fg);
+            TextView tv = text(a.label, lst ? 18 : 17, fg);
             tv.setGravity(lst ? Gravity.LEFT : Gravity.CENTER);
-            if (iv != null) { if (lst) tv.setPadding(dp(16), 0, 0, 0); else tv.setPadding(0, dp(8), 0, 0); }
-            t.addView(tv, lst ? new LinearLayout.LayoutParams(0, -2, 1f)
-                    : new LinearLayout.LayoutParams(iv != null ? dp(96) : -2, -2));
+            if (iv != null) { if (lst) tv.setPadding(dp(12), 0, 0, 0); else tv.setPadding(0, dp(8), 0, 0); }
+            t.addView(tv, lst ? new LinearLayout.LayoutParams(0, -2, 1f) : new LinearLayout.LayoutParams(-1, -2));
         }
         t.setOnFocusChangeListener(new View.OnFocusChangeListener() {
             public void onFocusChange(View v, boolean f) {
-                float sc = f ? (lst ? 1.05f : 1.12f) : 1f;
-                v.animate().scaleX(sc).scaleY(sc).setDuration(120).start();
                 if (f) focusIdx = ((ViewGroup) v.getParent()).indexOfChild(v);
             }
         });
         t.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) { if (a.cn == null) openOverlay(); else launch(a); }
+            public void onClick(View v) { launch(a); }
         });
         return t;
     }
@@ -351,13 +376,12 @@ public class MainActivity extends Activity {
     }
 
     void icon(final App a, final ImageView iv) {
-        if (a.cn == null) { iv.setImageResource(android.R.drawable.ic_menu_preferences); return; }
         iv.setTag(a.pkg);
         Bitmap b = cache.get(a.pkg);
         if (b != null) { iv.setImageBitmap(b); return; }
         io.execute(new Runnable() { public void run() {
             try {
-                int px = dp(64);
+                int px = dp(40);
                 Drawable dr = pm.getActivityIcon(a.cn);
                 final Bitmap bm = Bitmap.createBitmap(px, px, Bitmap.Config.ARGB_8888);
                 dr.setBounds(0, 0, px, px);
@@ -370,20 +394,62 @@ public class MainActivity extends Activity {
         }});
     }
 
+    /** Thin line icons drawn in code: 0 = picture, 1 = apps grid, 2 = gear. */
+    class IconView extends View {
+        final int type;
+        final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        IconView(Context c, int type) {
+            super(c); this.type = type;
+            p.setStyle(Paint.Style.STROKE); p.setStrokeCap(Paint.Cap.ROUND); p.setStrokeJoin(Paint.Join.ROUND);
+        }
+        @Override protected void onDraw(Canvas c) {
+            float s = Math.min(getWidth(), getHeight()), m = s * 0.25f, l = m, t = m, r = s - m, b = s - m, w = r - l;
+            p.setColor(fg); p.setStrokeWidth(s * 0.07f);
+            if (type == 0) {
+                c.drawRoundRect(new RectF(l, t, r, b), s * 0.08f, s * 0.08f, p);
+                c.drawCircle(l + w * 0.32f, t + w * 0.32f, s * 0.04f, p);
+                Path pa = new Path();
+                pa.moveTo(l, b - w * 0.2f); pa.lineTo(l + w * 0.38f, t + w * 0.5f);
+                pa.lineTo(l + w * 0.65f, b - w * 0.25f); pa.lineTo(l + w * 0.8f, b - w * 0.42f);
+                pa.lineTo(r, b - w * 0.2f);
+                c.drawPath(pa, p);
+            } else if (type == 1) {
+                float g = w * 0.14f, q = (w - g) / 2f;
+                for (int i = 0; i < 2; i++) for (int j = 0; j < 2; j++) {
+                    float x = l + i * (q + g), y = t + j * (q + g);
+                    c.drawRoundRect(new RectF(x, y, x + q, y + q), q * 0.25f, q * 0.25f, p);
+                }
+            } else {
+                float cx = s / 2f, cy = s / 2f, R = w / 2f;
+                c.drawCircle(cx, cy, R * 0.62f, p);
+                c.drawCircle(cx, cy, R * 0.26f, p);
+                for (int i = 0; i < 8; i++) {
+                    double a = i * Math.PI / 4;
+                    float ca = (float) Math.cos(a), sa = (float) Math.sin(a);
+                    c.drawLine(cx + ca * R * 0.62f, cy + sa * R * 0.62f, cx + ca * R, cy + sa * R, p);
+                }
+            }
+        }
+    }
+
     // ---------- settings overlay ----------
-    void openOverlay() {
-        overlayOpen = true; mode = 0;
+    void openOverlay(boolean appsDirect) {
+        overlayOpen = true;
         home.setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);
         panel.setVisibility(View.VISIBLE);
-        title.setText("Settings");
-        hint.setText("OK: change      Back: close");
-        adapter.notifyDataSetChanged();
+        if (appsDirect) { direct = true; enterApps(); }
+        else {
+            mode = 0;
+            title.setText("Settings");
+            hint.setText("OK: change      Back: close");
+            adapter.notifyDataSetChanged();
+            list.setSelection(0);
+        }
         list.requestFocus();
-        list.setSelection(0);
     }
 
     void closeOverlay() {
-        overlayOpen = false;
+        overlayOpen = false; direct = false;
         panel.setVisibility(View.GONE);
         home.setDescendantFocusability(ViewGroup.FOCUS_BEFORE_DESCENDANTS);
         render();
@@ -404,6 +470,7 @@ public class MainActivity extends Activity {
         StringBuilder sb = new StringBuilder();
         for (App a : edit) if (sel.contains(a.pkg)) { if (sb.length() > 0) sb.append(','); sb.append(a.pkg); }
         sp.edit().putString("order", sb.toString()).apply();
+        if (direct) { closeOverlay(); return; }
         mode = 0;
         title.setText("Settings");
         hint.setText("OK: change      Back: close");
